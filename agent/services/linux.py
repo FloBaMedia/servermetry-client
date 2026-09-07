@@ -15,6 +15,7 @@ from models.limits import (
     STATE_ENCODING,
     TOP_PROCESS_LIMIT,
 )
+from models.paths import host_path, host_root, mounts_path, proc_path
 from utils.lock import FileLock
 from utils.logging import log_write
 from utils.snapshot import CpuSnapStore
@@ -30,7 +31,7 @@ _snap_store = CpuSnapStore(_CPU_SNAP_FILE)
 
 def _parse_proc_stat():
     try:
-        with open("/proc/stat", "r") as f:
+        with open(proc_path("stat"), "r") as f:
             for line in f:
                 if line.startswith("cpu "):
                     return [int(x) for x in line.split()[1:]]
@@ -42,7 +43,7 @@ def _parse_proc_stat():
 def _parse_proc_diskstats():
     result = {}
     try:
-        with open("/proc/diskstats", "r") as f:
+        with open(proc_path("diskstats"), "r") as f:
             for line in f:
                 parts = line.split()
                 if len(parts) < 10:
@@ -107,7 +108,7 @@ def _calc_deltas(snap0, snap1):
 def _read_cpu_cores():
     try:
         count = 0
-        with open("/proc/cpuinfo", "r") as f:
+        with open(proc_path("cpuinfo"), "r") as f:
             for line in f:
                 if line.startswith("processor"):
                     count += 1
@@ -122,7 +123,7 @@ def _read_cpu_info():
     mhz = None
     threads = 0
     try:
-        with open("/proc/cpuinfo", "r") as f:
+        with open(proc_path("cpuinfo"), "r") as f:
             for line in f:
                 if line.startswith("processor"):
                     threads += 1
@@ -140,7 +141,7 @@ def _read_cpu_info():
 
 def _read_load_avg():
     try:
-        with open("/proc/loadavg", "r") as f:
+        with open(proc_path("loadavg"), "r") as f:
             parts = f.read().split()
             return float(parts[0]), float(parts[1]), float(parts[2])
     except Exception as e:
@@ -151,7 +152,7 @@ def _read_load_avg():
 def _read_memory():
     result = {"MemTotal": 0, "MemAvailable": 0, "SwapTotal": 0, "SwapFree": 0}
     try:
-        with open("/proc/meminfo", "r") as f:
+        with open(proc_path("meminfo"), "r") as f:
             for line in f:
                 for key in result:
                     if line.startswith(key + ":"):
@@ -174,10 +175,10 @@ def _read_disk_usages():
     seen_mountpoints = set()
     seen_fs_ids = set()
     try:
-        with open("/proc/mounts", "r") as f:
+        with open(mounts_path(), "r") as f:
             mounts = f.readlines()
     except Exception as e:
-        log_write("WARNING", "disk: cannot read /proc/mounts: {}".format(e))
+        log_write("WARNING", "disk: cannot read {}: {}".format(mounts_path(), e))
         return result
 
     for line in mounts:
@@ -193,7 +194,7 @@ def _read_disk_usages():
             continue
         seen_mountpoints.add(mountpoint)
         try:
-            st = os.statvfs(mountpoint)
+            st = os.statvfs(host_path(mountpoint))
             if st.f_blocks == 0:
                 continue
             fs_id = (st.f_blocks, st.f_frsize)
@@ -276,7 +277,7 @@ def _read_network_interfaces():
     result = []
     addr_map = _read_iface_addresses()
     try:
-        with open("/proc/net/dev", "r") as f:
+        with open(proc_path("net/dev"), "r") as f:
             lines = f.readlines()
     except Exception as e:
         log_write("WARNING", "network: cannot read /proc/net/dev: {}".format(e))
@@ -313,7 +314,7 @@ def _read_raid_arrays():
     """Parse /proc/mdstat for software RAID health."""
     arrays = []
     try:
-        with open("/proc/mdstat", "r") as f:
+        with open(proc_path("mdstat"), "r") as f:
             content = f.read()
     except FileNotFoundError:
         return arrays
@@ -451,11 +452,11 @@ def _read_top_processes(limit=TOP_PROCESS_LIMIT):
     try:
         def _read_proc_stats():
             stats = {}
-            for pid in os.listdir("/proc"):
+            for pid in os.listdir(proc_path()):
                 if not pid.isdigit():
                     continue
                 try:
-                    with open("/proc/{}/stat".format(pid), "r") as f:
+                    with open(proc_path("{}/stat".format(pid)), "r") as f:
                         parts = f.read().split()
                     name = parts[1].strip("()")
                     utime = int(parts[13])
@@ -471,7 +472,7 @@ def _read_top_processes(limit=TOP_PROCESS_LIMIT):
 
         mem_total = 0
         try:
-            with open("/proc/meminfo", "r") as f:
+            with open(proc_path("meminfo"), "r") as f:
                 for line in f:
                     if line.startswith("MemTotal:"):
                         mem_total = int(line.split()[1]) * 1024
@@ -488,7 +489,7 @@ def _read_top_processes(limit=TOP_PROCESS_LIMIT):
             mem_mb = 0.0
             user = ""
             try:
-                with open("/proc/{}/status".format(pid), "r") as f:
+                with open(proc_path("{}/status".format(pid)), "r") as f:
                     for line in f:
                         if line.startswith("VmRSS:"):
                             mem_mb = round(int(line.split()[1]) / 1024.0, 1)
@@ -518,7 +519,7 @@ def _read_top_processes(limit=TOP_PROCESS_LIMIT):
 
 def _read_process_count():
     try:
-        return sum(1 for d in os.listdir("/proc") if d.isdigit())
+        return sum(1 for d in os.listdir(proc_path()) if d.isdigit())
     except Exception as e:
         log_write("WARNING", "process_count unavailable: {}".format(e))
         return 0
@@ -526,7 +527,7 @@ def _read_process_count():
 
 def _read_open_files():
     try:
-        with open("/proc/sys/fs/file-nr", "r") as f:
+        with open(proc_path("sys/fs/file-nr"), "r") as f:
             return int(f.read().split()[0])
     except Exception as e:
         log_write("WARNING", "open_files unavailable: {}".format(e))
@@ -535,7 +536,7 @@ def _read_open_files():
 
 def _read_os_info():
     try:
-        with open("/etc/os-release", "r") as f:
+        with open(host_path("/etc/os-release"), "r") as f:
             for line in f:
                 if line.startswith("PRETTY_NAME="):
                     return line.split("=", 1)[1].strip().strip('"')
@@ -546,7 +547,7 @@ def _read_os_info():
 
 def _read_uptime():
     try:
-        with open("/proc/uptime", "r") as f:
+        with open(proc_path("uptime"), "r") as f:
             return int(float(f.read().split()[0]))
     except Exception as e:
         log_write("WARNING", "uptime unavailable: {}".format(e))
@@ -555,6 +556,9 @@ def _read_uptime():
 
 def _read_pending_updates():
     """Return (count, security_count, packages) from apt, with 30-min file cache."""
+    if host_root():
+        # Container apt would list the image, not the host. Skip rather than lie.
+        return None, None, None
     try:
         now = time.time()
         try:
@@ -610,7 +614,7 @@ def _read_pending_updates():
 def read_listening_ports():
     """Return sorted list of listening TCP ports via /proc/net/tcp[6]."""
     ports = set()
-    for path in ["/proc/net/tcp", "/proc/net/tcp6"]:
+    for path in [proc_path("net/tcp"), proc_path("net/tcp6")]:
         try:
             with open(path, "r") as f:
                 lines = f.readlines()
@@ -631,6 +635,14 @@ def read_listening_ports():
 
 def collect_linux_metrics():
     from models.constants import AGENT_VERSION
+
+    configured_root = (os.environ.get("SERVERMETRY_HOST_ROOT") or "").strip()
+    if configured_root and not host_root():
+        log_write(
+            "WARNING",
+            "SERVERMETRY_HOST_ROOT={!r} is set but not mounted; "
+            "collecting container metrics instead of host metrics".format(configured_root),
+        )
 
     with FileLock(_LOCK_FILE, timeout=30) as lock:
         if not lock._acquired:
