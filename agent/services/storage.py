@@ -90,11 +90,18 @@ def smart_disk(data, device):
             "temperatureC": temperature if isinstance(temperature, (int, float)) else None}
 
 
+def find_storage_tool(name):
+    # Cron commonly omits sbin, where distribution storage utilities live.
+    path = os.environ.get("PATH", os.defpath) + os.pathsep + "/usr/sbin" + os.pathsep + "/sbin"
+    return shutil.which(name, path=path)
+
+
 def read_smart_disks():
-    if not shutil.which("smartctl"):
+    smartctl = find_storage_tool("smartctl")
+    if not smartctl:
         return [], "unavailable"
     deadline = time.monotonic() + 20
-    raw, code = run_readonly(["smartctl", "--scan", "-j"], 3)
+    raw, code = run_readonly([smartctl, "--scan", "-j"], 3)
     try:
         devices = json.loads(raw).get("devices", [])
     except (ValueError, TypeError, AttributeError):
@@ -115,7 +122,7 @@ def read_smart_disks():
         if len(disks) >= 32 or time.monotonic() >= deadline:
             state = "error"
             break
-        args = ["smartctl", "-j", "-H", "-A", "-i"]
+        args = [smartctl, "-j", "-H", "-A", "-i"]
         if isinstance(entry.get("type"), str):
             args += ["-d", entry["type"]]
         raw, code = run_readonly(args + [device], max(0.1, min(3, deadline - time.monotonic())))
@@ -149,8 +156,9 @@ def read_disk_health():
         raid_status = "unavailable"
         disks, smart_status = [], "unavailable"
     else:
-        if shutil.which("zpool"):
-            output, code = run_readonly(["zpool", "status", "-P"], 5)
+        zpool = find_storage_tool("zpool")
+        if zpool:
+            output, code = run_readonly([zpool, "status", "-P"], 5)
             pools = parse_zpool_status(output)
             raids.extend(pools)
             if code != 0 or (not pools and "no pools available" not in output) or any(p["state"] == "unknown" for p in pools):

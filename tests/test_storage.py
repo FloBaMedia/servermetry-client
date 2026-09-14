@@ -104,3 +104,18 @@ errors: No known data errors
         root = Path(__file__).resolve().parents[1]
         for name in ["agent/agent.py", "agent/install.sh", "agent/install-windows.ps1", "agent/services/updater.py"]:
             self.assertIn('"services/storage.py"', (root / name).read_text())
+
+
+@patch.dict(os.environ, {"PATH": "/usr/bin:/bin", "SERVERMETRY_HOST_ROOT": ""})
+@patch("services.storage.shutil.which")
+@patch("services.storage.run_readonly")
+@patch("services.storage.read_smart_disks", return_value=([], "unavailable"))
+@patch("builtins.open", new_callable=mock_open, read_data="Personalities :")
+def test_cron_resolves_zpool_in_sbin(_open, _smart, run, which):
+    which.side_effect = lambda name, path: "/usr/sbin/" + name if "/usr/sbin" in path.split(os.pathsep) else None
+    run.return_value = ("  pool: rpool\n state: ONLINE\nerrors: No known data errors\n", 0)
+    result = storage.read_disk_health()
+    assert result["raidCheckStatus"] == "collected"
+    assert result["raids"][0]["name"] == "zfs:rpool"
+    run.assert_called_once_with(["/usr/sbin/zpool", "status", "-P"], 5)
+    assert storage.find_storage_tool("smartctl") == "/usr/sbin/smartctl"
