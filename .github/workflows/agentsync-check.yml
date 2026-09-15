@@ -1,0 +1,52 @@
+name: AgentSync
+
+# Generated outputs (CLAUDE.md, .claude/, .cursor/, …) are committed, so this
+# gate proves they still match .ai/src/. It installs the version this project
+# pins in .ai/agent_sync.yaml, because a different engine can generate
+# different bytes.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  check:
+    name: Outputs match .ai/src/
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install AgentSync 0.36.0
+        run: curl -fsSL https://raw.githubusercontent.com/yelmuratoff/agent_sync/main/install.sh | AGENTSYNC_VERSION=0.36.0 bash
+      - name: Check
+        run: agentsync check
+
+  # For teams who would rather not install AgentSync locally: this job
+  # regenerates the outputs and commits them into the pull request branch.
+  # To enable it, replace `if: false` with
+  #   if: github.event_name == 'pull_request'
+  # Pushes use the workflow token, so also allow it in
+  # Settings → Actions → General → Workflow permissions (read and write).
+  autofix:
+    name: Sync outputs into the PR
+    if: false
+    needs: check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+      - name: Install AgentSync 0.36.0
+        run: curl -fsSL https://raw.githubusercontent.com/yelmuratoff/agent_sync/main/install.sh | AGENTSYNC_VERSION=0.36.0 bash
+      - name: Sync
+        run: agentsync sync
+      - name: Commit regenerated outputs
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --cached --quiet && exit 0
+          git commit -m "chore: sync agent config"
+          git push
