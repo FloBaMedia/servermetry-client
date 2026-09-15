@@ -20,7 +20,7 @@ jobs:
         shell: bash
         run: |
           git clone --quiet https://github.com/yelmuratoff/agent.git "$HOME/.agentsync"
-          git -C "$HOME/.agentsync" checkout --quiet --detach 5c8220376c90969b393b07df83d25f50b819ba69
-          test "$(git -C "$HOME/.agentsync" rev-parse HEAD)" = "5c8220376c90969b393b07df83d25f50b819ba69"
+          git -C "$HOME/.agentsync" checkout --quiet --detach b0a962437f1512b5d0a7b7774a4ece51ede4b433
+          test "$(git -C "$HOME/.agentsync" rev-parse HEAD)" = "b0a962437f1512b5d0a7b7774a4ece51ede4b433"
       - name: Check generated outputs
         run: AGENTSYNC_HOME="$HOME/.agentsync" "$HOME/.agentsync/bin/agentsync.sh" check
