@@ -38,7 +38,9 @@
       "Read(.env.*)",
       "Read(**/secrets/**)",
       "Read(**/*.pem)",
-      "Read(**/id_rsa*)"
+      "Read(**/id_rsa*)",
+      "Read(.secrets/**)",
+      "Edit(.secrets/**)"
     ]
   }
 }

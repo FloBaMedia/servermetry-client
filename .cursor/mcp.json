@@ -1,3 +1,39 @@
 {
-  "mcpServers": {}
+  "mcpServers": {
+    "fbm-browser": {
+      "command": "mcpm",
+      "args": [
+        "run",
+        "fbm-browser"
+      ]
+    },
+    "mcp-email-server": {
+      "command": "mcpm",
+      "args": [
+        "run",
+        "mcp-email-server"
+      ]
+    },
+    "servermetry": {
+      "command": "mcpm",
+      "args": [
+        "run",
+        "servermetry"
+      ]
+    },
+    "shoutrrr": {
+      "command": "mcpm",
+      "args": [
+        "run",
+        "shoutrrr"
+      ]
+    },
+    "warden": {
+      "command": "mcpm",
+      "args": [
+        "run",
+        "warden"
+      ]
+    }
+  }
 }
