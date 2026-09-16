@@ -1,0 +1,26 @@
+name: AgentSync
+
+on:
+  pull_request:
+  push:
+    branches: [main, master]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Outputs match .ai/src/
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Install pinned AgentSync 0.36.0
+        shell: bash
+        run: |
+          git clone --quiet https://github.com/yelmuratoff/agent.git "$HOME/.agentsync"
+          git -C "$HOME/.agentsync" checkout --quiet --detach b0a962437f1512b5d0a7b7774a4ece51ede4b433
+          test "$(git -C "$HOME/.agentsync" rev-parse HEAD)" = "b0a962437f1512b5d0a7b7774a4ece51ede4b433"
+      - name: Check generated outputs
+        run: AGENTSYNC_HOME="$HOME/.agentsync" "$HOME/.agentsync/bin/agentsync.sh" check
