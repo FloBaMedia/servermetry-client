@@ -13,6 +13,7 @@ __pycache__/
 *.conf
 .env
 .env.*
+!.env.example
 
 # Logs & runtime artifacts
 *.log
@@ -27,6 +28,7 @@ __pycache__/
 .update.lock
 .update_staging/
 .update_backup/
+.apt_cache
 
 # OS
 .DS_Store

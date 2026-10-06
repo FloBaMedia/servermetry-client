@@ -4,9 +4,11 @@
 import json
 import os
 import platform
+import signal
 import socket
 import subprocess
 import sys
+import time
 
 
 def _bootstrap():
@@ -78,8 +80,9 @@ _bootstrap()
 from models.constants import AGENT_VERSION, DEFAULT_API_URL
 from models.limits import SCRIPT_EXEC_TIMEOUT, STATE_ENCODING
 from utils.config import ensure_config, load_config
+from models.paths import in_container
 from utils.lock import FileLock, atomic_write
-from utils.logging import log_debug, log_write
+from utils.logging import log_debug, log_write, set_stderr_logging
 
 _CONFIG_STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".config_state")
 _CONFIG_LOCK_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".config_state.lock")
@@ -149,6 +152,7 @@ Options:
     --schedule <cron|remove>      Schedule or remove the template as a cron job
   --config <path>                 Path to config file (default: /etc/servermetry/agent.conf)
   --no-apply-config               Skip fetching and applying remote config changes
+  --loop                          Keep running; report on an interval (for Docker)
   --debug                         Enable verbose debug logging
   -h, --help                      Show this help message
 """
@@ -172,6 +176,7 @@ def parse_args():
     debug = "--debug" in args
     no_apply_config = "--no-apply-config" in args
     discover_ports = "--discover-ports" in args
+    loop = "--loop" in args
     config_path = None
     template_id = None
     schedule = None
@@ -190,7 +195,7 @@ def parse_args():
 
     _KNOWN_FLAGS = {
         "--info", "--config-status", "--dry-run", "--check", "--check-update", "--update",
-        "--update-status", "--debug", "--no-apply-config", "--discover-ports",
+        "--update-status", "--debug", "--no-apply-config", "--discover-ports", "--loop",
         "--config", "--apply-template", "--schedule", "-h", "--help",
     }
     _VALUE_FLAGS = {"--config", "--apply-template", "--schedule"}
@@ -207,7 +212,7 @@ def parse_args():
             print(HELP_TEXT.format(version=AGENT_VERSION))
             sys.exit(1)
 
-    return info, config_status, dry_run, check, check_update, force_update, update_status, debug, config_path, template_id, schedule, no_apply_config, discover_ports
+    return info, config_status, dry_run, check, check_update, force_update, update_status, debug, config_path, template_id, schedule, no_apply_config, discover_ports, loop
 
 
 def _print_check(metrics):
@@ -314,9 +319,152 @@ def apply_template_script(api_url, api_key, template_id, server_id, log_debug_fn
     return execute_script(script_content, log_debug_fn=log_debug_fn)[0]
 
 
+_STOP = False
+
+
+def _request_stop(signum, frame):
+    global _STOP
+    _STOP = True
+
+
+def _report_interval(remote_config):
+    env = os.environ.get("SERVERMETRY_INTERVAL", "").strip()
+    if env:
+        try:
+            return max(10, min(3600, int(env)))
+        except ValueError:
+            pass
+    interval = (remote_config or {}).get("reportIntervalSeconds") or 60
+    try:
+        return max(10, min(3600, int(interval)))
+    except (TypeError, ValueError):
+        return 60
+
+
+def _sleep_interruptible(seconds):
+    end = time.time() + max(0, float(seconds))
+    while not _STOP:
+        remaining = end - time.time()
+        if remaining <= 0:
+            return
+        time.sleep(min(1.0, remaining))
+
+
+def _collect_metrics():
+    _system = platform.system()
+    if _system == "Windows":
+        from services.windows import collect_windows_metrics
+        return collect_windows_metrics()
+    if _system == "Darwin":
+        from services.darwin import collect_darwin_metrics
+        return collect_darwin_metrics()
+    from services.linux import collect_linux_metrics
+    return collect_linux_metrics()
+
+
+def _attach_service_statuses(metrics, stored_services):
+    if not stored_services:
+        return
+    service_statuses = []
+    for svc in stored_services:
+        port = svc.get("port")
+        if not port:
+            continue
+        protocol = (svc.get("protocol") or "TCP").upper()
+        if protocol == "UDP":
+            continue  # UDP requires app-level probing; skip silently
+        status, error = _check_service_port(int(port), protocol)
+        entry = {"serviceId": svc["id"], "status": status}
+        if error:
+            entry["error"] = error
+        service_statuses.append(entry)
+    if service_statuses:
+        metrics["serviceStatuses"] = service_statuses
+
+
+def _metrics_cycle(api_url, api_key, debug, no_apply_config):
+    """Collect metrics, POST them, apply config/updates. Returns (ok, remote_config)."""
+    skip_config = no_apply_config
+    config_lock = FileLock(_CONFIG_LOCK_FILE, timeout=30)
+    lock_held = config_lock.acquire(blocking=False)
+    if not lock_held:
+        log_write("WARNING", "Config state locked by another process, skipping config update")
+        skip_config = True
+
+    remote_config = {}
+    try:
+        if skip_config:
+            stored_changed_at, remote_config, stored_services, config_state_loaded = None, {}, [], False
+        else:
+            stored_changed_at, remote_config, stored_services, config_state_loaded = _load_config_state()
+
+        metrics = _collect_metrics()
+        log_debug("Metrics collected successfully", debug_flag=debug)
+        _attach_service_statuses(metrics, stored_services)
+
+        from client.api import post_metrics
+        ok, config_changed_at, enable_auto_updates, commands, post_err = post_metrics(
+            api_url, api_key, metrics, log_debug_fn=lambda msg: log_debug(msg, debug_flag=debug)
+        )
+        if not ok:
+            log_write("ERROR", "Failed to post metrics: {}".format(post_err))
+
+        needs_config_fetch = (not config_state_loaded) or (config_changed_at != stored_changed_at)
+        if ok and not skip_config and needs_config_fetch:
+            from client.api import get_config
+            from services.config_applier import apply_config
+
+            if not config_state_loaded:
+                log_debug("No cached config — fetching for the first time", debug_flag=debug)
+            else:
+                log_debug("Config changed on server — re-fetching", debug_flag=debug)
+
+            config_ok, fetched_config, fetched_services = get_config(
+                api_url, api_key, log_debug_fn=lambda msg: log_debug(msg, debug_flag=debug)
+            )
+            if config_ok:
+                remote_config = fetched_config if isinstance(fetched_config, dict) else {}
+                stored_services = fetched_services if isinstance(fetched_services, list) else []
+                if remote_config:
+                    apply_config(remote_config, log_debug_fn=lambda msg: log_debug(msg, debug_flag=debug))
+                _save_config_state(config_changed_at, remote_config, stored_services)
+            else:
+                log_debug("Could not fetch config from server", debug_flag=debug)
+
+        if enable_auto_updates is None:
+            enable_auto_updates = remote_config.get("enableAutoUpdates")
+        if ok and not skip_config and enable_auto_updates is not False:
+            from services.updater import check_and_update
+            check_and_update(log_debug_fn=lambda msg: log_debug(msg, debug_flag=debug))
+
+        if ok and "discover-ports" in commands:
+            if platform.system() != "Linux":
+                log_write("WARNING", "Server requested port scan but --discover-ports is Linux only — skipping")
+            else:
+                log_write("INFO", "Server requested port scan — running")
+                try:
+                    from services.linux import read_listening_ports
+                    from client.api import post_discovered_ports
+                    _ports = read_listening_ports()
+                    post_discovered_ports(
+                        api_url, api_key, _ports,
+                        log_debug_fn=lambda msg: log_debug(msg, debug_flag=debug),
+                    )
+                    log_write("INFO", "Port scan complete — {} port(s) reported".format(len(_ports)))
+                except Exception as _e:
+                    log_write("WARNING", "Server-requested port scan failed: {}".format(_e))
+
+        return ok, remote_config
+    finally:
+        if lock_held:
+            config_lock.release()
+
+
 def main():
-    info, config_status, dry_run, check, check_update, force_update, show_update_status, cli_debug, config_override, template_id, schedule, no_apply_config, discover_ports = parse_args()
+    info, config_status, dry_run, check, check_update, force_update, show_update_status, cli_debug, config_override, template_id, schedule, no_apply_config, discover_ports, loop = parse_args()
     DEBUG = cli_debug
+    if in_container():
+        set_stderr_logging(True)
 
     try:
         from services.path_migration import migrate_install_paths
@@ -418,7 +566,7 @@ def main():
         if template_id:
             log_debug("template_id={}".format(template_id), debug_flag=DEBUG)
 
-    if not dry_run:
+    if not dry_run and not check:
         values = ensure_config(values, conf_path, config_override)
 
     api_url = values.get("api_url", DEFAULT_API_URL)
@@ -457,118 +605,46 @@ def main():
             log_write("ERROR", "Failed to report ports: {}".format(err))
         sys.exit(0 if ok else 1)
 
-    config_lock = FileLock(_CONFIG_LOCK_FILE, timeout=30)
-    if not config_lock.acquire(blocking=False):
-        log_write("WARNING", "Config state locked by another process, skipping config update")
-        no_apply_config = True
+    if loop and (check or dry_run):
+        log_write("WARNING", "--loop is ignored together with --check or --dry-run")
+        loop = False
 
-    if dry_run or no_apply_config:
-        stored_changed_at, remote_config, stored_services, config_state_loaded = None, {}, [], False
-    else:
-        stored_changed_at, remote_config, stored_services, config_state_loaded = _load_config_state()
-
-    _system = platform.system()
-    if _system == "Windows":
-        from services.windows import collect_windows_metrics
-        metrics = collect_windows_metrics()
-    elif _system == "Darwin":
-        from services.darwin import collect_darwin_metrics
-        metrics = collect_darwin_metrics()
-    else:
-        from services.linux import collect_linux_metrics
-        metrics = collect_linux_metrics()
-
-    log_debug("Metrics collected successfully", debug_flag=DEBUG)
-
-    # Check service ports from last-known config
-    if stored_services and not dry_run and not check:
-        service_statuses = []
-        for svc in stored_services:
-            port = svc.get("port")
-            if not port:
-                continue
-            protocol = (svc.get("protocol") or "TCP").upper()
-            if protocol == "UDP":
-                continue  # UDP requires app-level probing; skip silently
-            status, error = _check_service_port(int(port), protocol)
-            entry = {"serviceId": svc["id"], "status": status}
-            if error:
-                entry["error"] = error
-            service_statuses.append(entry)
-        if service_statuses:
-            metrics["serviceStatuses"] = service_statuses
-
-    if check:
-        _print_check(metrics)
-        sys.exit(0)
-
-    if dry_run:
+    if check or dry_run:
+        metrics = _collect_metrics()
+        log_debug("Metrics collected successfully", debug_flag=DEBUG)
+        if check:
+            _print_check(metrics)
+            sys.exit(0)
         print(json.dumps(metrics, indent=2))
         sys.exit(0)
 
-    from client.api import post_metrics
-    ok, config_changed_at, enable_auto_updates, commands, post_err = post_metrics(
-        api_url, api_key, metrics, log_debug_fn=lambda msg: log_debug(msg, debug_flag=DEBUG)
-    )
-    if not ok:
-        log_write("ERROR", "Failed to post metrics: {}".format(post_err))
+    def _run_once():
+        try:
+            return _metrics_cycle(api_url, api_key, DEBUG, no_apply_config)
+        except Exception as e:
+            log_write("ERROR", "Metrics cycle failed: {}".format(e))
+            return False, {}
 
-    # Bootstrap when no state file exists yet, or when the server timestamp
-    # differs from what we last stored. Key off config_state_loaded (file read
-    # ok), not truthiness of remote_config / stored_changed_at — empty config
-    # or a null timestamp after a successful fetch must not refetch forever.
-    needs_config_fetch = (not config_state_loaded) or (config_changed_at != stored_changed_at)
-    if ok and not no_apply_config and needs_config_fetch:
-        from client.api import get_config
-        from services.config_applier import apply_config
+    ok, remote_config = _run_once()
+    if not loop:
+        sys.exit(0 if ok else 1)
 
-        if not config_state_loaded:
-            log_debug("No cached config — fetching for the first time", debug_flag=DEBUG)
-        else:
-            log_debug("Config changed on server — re-fetching", debug_flag=DEBUG)
+    try:
+        signal.signal(signal.SIGTERM, _request_stop)
+        signal.signal(signal.SIGINT, _request_stop)
+    except (ValueError, OSError):
+        pass
 
-        config_ok, fetched_config, fetched_services = get_config(
-            api_url, api_key, log_debug_fn=lambda msg: log_debug(msg, debug_flag=DEBUG)
-        )
-        if config_ok:
-            # Persist even if config is empty/None so bootstrap does not loop.
-            remote_config = fetched_config if isinstance(fetched_config, dict) else {}
-            stored_services = fetched_services if isinstance(fetched_services, list) else []
-            if remote_config:
-                apply_config(remote_config, log_debug_fn=lambda msg: log_debug(msg, debug_flag=DEBUG))
-            _save_config_state(config_changed_at, remote_config, stored_services)
-            config_state_loaded = True
-        else:
-            log_debug("Could not fetch config from server", debug_flag=DEBUG)
-
-    if not no_apply_config:
-        config_lock.release()
-
-    # Prefer the live metrics flag (fresh every report). Fall back to cached
-    # config for older APIs. Product default is enabled (opt-out): run unless
-    # explicitly False.
-    if enable_auto_updates is None:
-        enable_auto_updates = remote_config.get("enableAutoUpdates")
-    if ok and not no_apply_config and enable_auto_updates is not False:
-        from services.updater import check_and_update
-        check_and_update(log_debug_fn=lambda msg: log_debug(msg, debug_flag=DEBUG))
-
-    if ok and "discover-ports" in commands:
-        if platform.system() != "Linux":
-            log_write("WARNING", "Server requested port scan but --discover-ports is Linux only — skipping")
-        else:
-            log_write("INFO", "Server requested port scan — running")
-            try:
-                from services.linux import read_listening_ports
-                from client.api import post_discovered_ports
-                _ports = read_listening_ports()
-                post_discovered_ports(api_url, api_key, _ports,
-                                      log_debug_fn=lambda msg: log_debug(msg, debug_flag=DEBUG))
-                log_write("INFO", "Port scan complete — {} port(s) reported".format(len(_ports)))
-            except Exception as _e:
-                log_write("WARNING", "Server-requested port scan failed: {}".format(_e))
-
-    sys.exit(0 if ok else 1)
+    log_write("INFO", "Loop mode started (interval from config or SERVERMETRY_INTERVAL)")
+    while not _STOP:
+        interval = _report_interval(remote_config)
+        log_debug("Sleeping {}s until next report".format(interval), debug_flag=DEBUG)
+        _sleep_interruptible(interval)
+        if _STOP:
+            break
+        ok, remote_config = _run_once()
+    log_write("INFO", "Loop mode stopped")
+    sys.exit(0)
 
 
 if __name__ == "__main__":

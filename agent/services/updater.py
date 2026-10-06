@@ -457,6 +457,16 @@ def _stage_and_apply_update(remote_version, log_debug_fn=None):
 
 
 def check_and_update(log_debug_fn=None, force=False):
+    try:
+        from models.paths import in_container
+    except ImportError:
+        in_container = lambda: False  # noqa: E731
+    if in_container():
+        if log_debug_fn:
+            log_debug_fn("Auto-update: skipped in container mode (rebuild the image)")
+        log_write("INFO", "Auto-update: skipped in container mode")
+        return "skipped"
+
     elapsed = time.time() - _read_last_check_ts()
     if not force and elapsed < UPDATE_CHECK_INTERVAL:
         if log_debug_fn:
