@@ -33,3 +33,9 @@ __pycache__/
 # OS
 .DS_Store
 Thumbs.db
+# AgentSync local state
+.ai/backups/
+.ai/tmp/
+!.cursor/
+!.cursor/mcp.json
+!.mcp.json

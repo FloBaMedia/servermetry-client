@@ -1,0 +1,32 @@
+---
+globs: '**/*'
+alwaysApply: true
+---
+
+# Git Rules
+
+One logical change per commit, imperative mood, build artefacts stay out of history.
+
+## Commits
+
+- Match the project's existing commit style (`git log --oneline -10`). If none is established, default to Conventional Commits: `<type>: <subject>` with `feat`, `fix`, `refactor`, `docs`, `test`, `chore`.
+- One logical change per commit. Split unrelated work into separate commits.
+- Subject in imperative mood, ≤72 chars. Body explains *why*; skip the body when the subject says enough.
+- Never append attribution or tooling trailers — no `Co-Authored-By:`, no `Generated with …`, no agent/model signatures. A commit records the human author only.
+
+## Branches
+
+- Descriptive names: `feat/<slug>`, `fix/<slug>`, `refactor/<slug>`.
+- Rebase onto the default branch before opening a PR.
+
+## Pull Requests
+
+- Link the related ticket or issue in the description.
+- Resolve hook or CI failures at the source rather than passing `--no-verify` — a green CI built on bypassed checks lies.
+- Prefer additive commits while reviewers are looking; coordinate before force-pushing a shared branch.
+
+## Keep Out of History
+
+- Build artefacts, lockfile binaries, secrets, and `.env*` files belong outside the repo.
+- Reach for `.gitignore` to fence off environment-specific or machine-local output.
+- Leave the `AI SYNC GENERATED` block in `.gitignore` to AgentSync — `outputs:` in `.ai/agent_sync.yaml` decides whether generated agent config is committed, and when it is, those files belong in the same commit as the `.ai/src/` change that produced them.

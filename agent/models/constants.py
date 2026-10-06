@@ -1,4 +1,4 @@
-AGENT_VERSION = "1.4.8"
+AGENT_VERSION = "1.4.10"
 LOG_MAX_BYTES = 1_048_576  # 1 MB
 DEFAULT_API_URL = "https://api.servermetry.com"
 

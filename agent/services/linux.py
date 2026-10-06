@@ -3,7 +3,6 @@
 import json
 import os
 import platform
-import re
 import subprocess
 import time
 from models.constants import SKIP_FILESYSTEMS, DISK_PREFIXES
@@ -16,6 +15,7 @@ from models.limits import (
     TOP_PROCESS_LIMIT,
 )
 from models.paths import host_path, host_root, mounts_path, proc_path
+from services.storage import read_disk_health as _read_disk_health
 from utils.lock import FileLock
 from utils.logging import log_write
 from utils.snapshot import CpuSnapStore
@@ -308,144 +308,6 @@ def _read_network_interfaces():
             log_write("WARNING", "network: parse error for {}: {}".format(name, e))
 
     return result
-
-
-def _read_raid_arrays():
-    """Parse /proc/mdstat for software RAID health."""
-    arrays = []
-    try:
-        with open(proc_path("mdstat"), "r") as f:
-            content = f.read()
-    except FileNotFoundError:
-        return arrays
-    except Exception as e:
-        log_write("WARNING", "raid: cannot read /proc/mdstat: {}".format(e))
-        return arrays
-
-    current = None
-    for line in content.splitlines():
-        line = line.strip()
-        if not line or line.startswith("Personalities") or line.startswith("unused"):
-            continue
-        if line.startswith("md"):
-            if current:
-                arrays.append(current)
-            parts = line.split()
-            name = parts[0]
-            # Format: md0 : active raid1 sda1[0] sdb1[1]
-            # Failed members appear as sdb1[1](F) on this summary line.
-            active = "active" in parts
-            level = ""
-            devices = []
-            failed = []
-            for p in parts[2:]:
-                if p.startswith("raid"):
-                    level = p
-                elif "[" in p:
-                    devices.append(p.split("[")[0])
-                    if "(F)" in p:
-                        failed.append(p.replace("(F)", "").split("[")[0])
-            current = {
-                "name": name,
-                "level": level,
-                "state": "active" if active else "inactive",
-                "devices": devices,
-                "degraded": bool(failed),
-                "failedDevices": failed,
-            }
-            if failed:
-                current["state"] = "degraded"
-        elif current:
-            m = re.search(r"\[([U_]+)\]", line)
-            if m and "_" in m.group(1):
-                current["degraded"] = True
-                current["state"] = "degraded"
-            # recovery/resync/reshape alone is not degraded (healthy check rebuilds
-            # also show these keywords). Reflect sync progress in state only.
-            if "recovery" in line or "resync" in line or "reshape" in line:
-                if current["degraded"] or current["state"] == "active":
-                    current["state"] = "recovering"
-            for tok in line.split():
-                if "(F)" in tok:
-                    name = tok.replace("(F)", "").split("[")[0]
-                    if name and name not in current["failedDevices"]:
-                        current["failedDevices"].append(name)
-                    current["degraded"] = True
-                    current["state"] = "degraded"
-    if current:
-        arrays.append(current)
-    return arrays
-
-
-def _read_smart_disks():
-    """Collect SMART health via smartctl when available."""
-    disks = []
-    scan = _run_cmd(["smartctl", "--scan"], timeout=8)
-    if not scan:
-        return disks
-
-    seen = set()
-    for line in scan.splitlines():
-        parts = line.split("#")[0].split()
-        if not parts:
-            continue
-        device = parts[0]
-        if device in seen:
-            continue
-        seen.add(device)
-        # Limit to physical disks
-        base = os.path.basename(device)
-        if not any(base.startswith(p) for p in DISK_PREFIXES):
-            continue
-
-        health = "UNKNOWN"
-        model = ""
-        temperature = None
-        out = _run_cmd(["smartctl", "-H", "-A", "-i", "-d", "auto", device], timeout=10)
-        if not out:
-            out = _run_cmd(["smartctl", "-H", "-A", "-i", device], timeout=10)
-        for hl in out.splitlines():
-            if "SMART overall-health" in hl or "SMART Health Status" in hl:
-                if "PASSED" in hl or "OK" in hl:
-                    health = "PASSED"
-                elif "FAILED" in hl or "FAILING" in hl:
-                    health = "FAILED"
-            if "Device Model:" in hl or "Model Number:" in hl or "Product:" in hl:
-                model = hl.split(":", 1)[-1].strip()
-            if "Temperature_Celsius" in hl or "Airflow_Temperature" in hl:
-                toks = hl.split()
-                for t in reversed(toks):
-                    if t.isdigit():
-                        temperature = int(t)
-                        break
-            if "Current Drive Temperature:" in hl:
-                try:
-                    temperature = int(hl.split(":")[-1].strip().split()[0])
-                except (ValueError, IndexError):
-                    pass
-
-        disks.append({
-            "name": device,
-            "model": model or None,
-            "health": health,
-            "temperatureC": temperature,
-        })
-        if len(disks) >= 32:
-            break
-    return disks
-
-
-def _read_disk_health():
-    raids = _read_raid_arrays()
-    disks = _read_smart_disks()
-    raid_degraded = sum(1 for r in raids if r.get("degraded"))
-    disk_unhealthy = sum(1 for d in disks if d.get("health") == "FAILED")
-    return {
-        "raids": raids,
-        "disks": disks,
-        "raidDegradedCount": raid_degraded,
-        "diskUnhealthyCount": disk_unhealthy,
-    }
 
 
 def _read_top_processes(limit=TOP_PROCESS_LIMIT):

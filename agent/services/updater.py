@@ -45,6 +45,7 @@ _MODULE_FILES = [
     "services/__init__.py",
     "services/config_applier.py",
     "services/linux.py",
+    "services/storage.py",
     "services/darwin.py",
     "services/windows.py",
     "services/updater.py",
