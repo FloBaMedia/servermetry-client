@@ -77,3 +77,59 @@ def windows_log_path():
 
 def legacy_windows_log_path():
     return LEGACY_WINDOWS_LOG_PATH
+
+
+# --- Container / host-root mapping (Docker Compose) ---
+
+_HOST_ROOT_ENV = "SERVERMETRY_HOST_ROOT"
+_CONTAINER_ENV = "SERVERMETRY_CONTAINER"
+_TRUTHY = ("1", "true", "yes")
+
+
+def host_root():
+    """Return the mounted host rootfs, or ``""`` when not in host-root mode."""
+    root = (os.environ.get(_HOST_ROOT_ENV) or "").strip().rstrip("/")
+    if root and os.path.isdir(root):
+        return root
+    return ""
+
+
+def in_container():
+    """True when running as a containerized agent (Compose / Docker)."""
+    if os.environ.get(_CONTAINER_ENV, "").strip().lower() in _TRUTHY:
+        return True
+    return bool(host_root())
+
+
+def host_path(path):
+    """Translate an absolute host path into the container namespace."""
+    root = host_root()
+    if not root:
+        return path
+    if not path:
+        return root
+    if not path.startswith("/"):
+        path = "/" + path
+    return root + path
+
+
+def proc_path(rel=""):
+    """Path under the host's ``/proc`` (or the container's if no host root)."""
+    base = host_path("/proc")
+    if not rel:
+        return base
+    return os.path.join(base, rel.lstrip("/"))
+
+
+def mounts_path():
+    """File that lists the *host* mount table when ``HOST_ROOT`` is set.
+
+    ``/proc/self/mounts`` follows the container mount namespace even when
+    ``/proc`` is bind-mounted. PID 1 on the host typically has the real table.
+    """
+    if host_root():
+        candidate = proc_path("1/mounts")
+        if os.path.isfile(candidate):
+            return candidate
+        return proc_path("mounts")
+    return "/proc/mounts"

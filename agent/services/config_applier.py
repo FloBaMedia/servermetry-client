@@ -417,6 +417,14 @@ def apply_config(config, log_debug_fn=None):
     custom_dns = config.get("customDns")
     interval = config.get("reportIntervalSeconds", 60) or 60
 
+    try:
+        from models.paths import in_container
+    except ImportError:
+        in_container = lambda: False  # noqa: E731
+    if in_container():
+        log_write("INFO", "Container mode: skipping host timezone/locale/NTP/DNS/cron")
+        return interval
+
     if log_debug_fn:
         log_debug_fn(
             "Applying config: timezone={}, locale={}, ntp={}, dns={}, interval={}s".format(

@@ -17,6 +17,9 @@ _LOG_TO_STDERR = False
 
 
 def _log_path():
+    env_path = os.environ.get("SERVERMETRY_LOG_PATH", "").strip()
+    if env_path:
+        return env_path
     if platform.system() == "Windows":
         if os.path.isfile(windows_log_path()):
             return windows_log_path()

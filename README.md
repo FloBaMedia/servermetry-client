@@ -15,6 +15,7 @@ Lightweight monitoring agent for [ServerMetry](https://github.com/FloBaMedia/Mon
 - CPU, memory, disk, swap, network I/O, and process metrics
 - Linux, macOS, and Windows support
 - One-line install via curl / PowerShell
+- Docker Compose deploy that monitors the **host** (not the container)
 - Non-interactive install via environment variables (for automated deployments)
 - Remote server configuration: timezone, locale, NTP, DNS, reporting interval
 - Agent auto-update from GitHub (opt-in, controlled via the dashboard)
@@ -66,6 +67,36 @@ Install Python **for all users** (not just the current account) so the Scheduled
 
 ---
 
+## Docker Compose (Linux host)
+
+Use this when the server already runs Docker and you want the agent as a container **that still reports host CPU, RAM, disks, and processes**.
+
+Website uptime and security scans are **not** done by this agent — the ServerMetry API runs those itself. A container without host mounts would only see its own cgroup and is not a website probe.
+
+```bash
+git clone --depth 1 https://github.com/FloBaMedia/servermetry-client.git
+cd servermetry-client
+cp .env.example .env
+# Set SERVERMETRY_API_KEY (and optionally SERVERMETRY_API_URL) in .env
+docker compose up -d --build
+```
+
+The compose file:
+
+- uses `pid: host`, `network_mode: host`, and `uts: host`
+- bind-mounts the host rootfs at `/host` (`SERVERMETRY_HOST_ROOT=/host`)
+- runs `python3 agent.py --loop` instead of cron
+- skips host timezone/DNS/NTP/cron apply and GitHub self-update (rebuild the image to update)
+
+```bash
+docker compose logs -f
+docker compose exec agent python3 /opt/servermetry/agent.py --check
+```
+
+Uninstall: `docker compose down` in the same directory (optionally `docker compose down --rmi local`).
+
+---
+
 ## Installation Details
 
 | | Linux / macOS | Windows |
@@ -103,6 +134,10 @@ debug    = false
 | `SERVERMETRY_API_URL` | API base URL |
 | `SERVERMETRY_API_KEY` | Server API key |
 | `SERVERMETRY_DEBUG` | Set to `1` to enable debug logging |
+| `SERVERMETRY_CONTAINER` | Set to `1` in Docker (disables self-update and host config apply) |
+| `SERVERMETRY_HOST_ROOT` | Host rootfs mount (Compose: `/host`) so collectors read host `/proc` |
+| `SERVERMETRY_INTERVAL` | Loop interval in seconds (Docker `--loop`; default 60) |
+| `SERVERMETRY_LOG_PATH` | Override log file path |
 
 Legacy `SERVERPULSE_*` names are still accepted.
 
@@ -121,7 +156,7 @@ The agent fetches its configuration from `GET /api/v1/agent/config` on every run
 | `reportIntervalSeconds` | Updates the cron / scheduled task interval |
 | `enableAutoUpdates` | Enables automatic agent self-update from GitHub |
 
-All remote config settings can be managed from the **Config tab** in the ServerMetry dashboard.
+All remote config settings can be managed from the **Config tab** in the ServerMetry dashboard. In Docker Compose, timezone/locale/NTP/DNS/cron are **not** applied to the host (the container must not mutate the host OS). The report interval is still honored via `--loop`.
 
 ---
 
@@ -138,12 +173,15 @@ When `enableAutoUpdates` is `true` in the server config, the agent checks for a 
 
 If the download or validation fails, the agent logs a warning/error and continues running the current version.
 
+In Docker Compose the in-container self-update is disabled (`SERVERMETRY_CONTAINER=1`). Update by pulling/rebuilding the image.
+
 ---
 
 ## CLI Reference
 
 ```
 python agent.py                          # collect metrics and POST to API
+python agent.py --loop                   # keep running (Docker Compose)
 python agent.py --dry-run                # print collected metrics as JSON, no HTTP
 python agent.py --config /path/to.conf  # override config file path
 python agent.py --apply-template <id>   # fetch and execute a server script template
@@ -180,6 +218,9 @@ The local runner uses `--debug` by default so output appears in the terminal. If
 ## Repository Structure
 
 ```
+Dockerfile                    # Container image for host monitoring
+docker-compose.yml            # Host pid/network + /host bind-mount
+.env.example                  # API URL/key for Compose
 agent/
 ├── agent.py                  # Entry point and CLI argument handling
 ├── install.sh                # Linux/macOS installer

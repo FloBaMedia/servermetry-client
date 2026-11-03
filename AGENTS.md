@@ -90,4 +90,5 @@ gh release create v1.4.6 \
 - Tag-Format immer `vX.Y.Z` (mit führendem `v`), Titel `ServerMetry Agent vX.Y.Z` — wie bei bestehenden Releases.
 - Kein Asset-Upload nötig: Installer und Updater laden Quelldateien von GitHub (`raw` / tree); das Release dient der Versionserkennung.
 - `install.sh` auf Hosts zieht weiterhin von `main` (`raw.githubusercontent.com/.../main/agent/...`). Das Release ist primär für Auto-Update und Dashboard-Vergleich.
+- Docker-Compose-Deploy (`Dockerfile` / `docker-compose.yml`) überwacht den **Host** via `/host`-Mount. Image neu bauen statt Self-Update. Website-Scans bleiben API-seitig.
 - Wenn `gh` nicht im PATH liegt, lokalen Wrapper nutzen (z. B. unter `~/.local/share/.../gh-cli/gh`).

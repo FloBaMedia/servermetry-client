@@ -1,0 +1,34 @@
+# ServerMetry agent — monitors the Docker *host*, not this container.
+#
+# 1. Create a server in the dashboard and copy the API key.
+# 2. cp .env.example .env  &&  edit SERVERMETRY_API_KEY
+# 3. docker compose up -d --build
+#
+# Website uptime/security scans are executed by the ServerMetry API, not by
+# this agent. Running the container without host mounts would only report
+# container metrics and is not useful as a website probe.
+#
+# Optional: bind-mount /dev and add privileged: true if you need SMART data.
+
+services:
+  agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: servermetry-agent:local
+    container_name: servermetry-agent
+    restart: unless-stopped
+    pid: host
+    uts: host
+    network_mode: host
+    environment:
+      SERVERMETRY_API_URL: ${SERVERMETRY_API_URL:-https://api.servermetry.com}
+      SERVERMETRY_API_KEY: ${SERVERMETRY_API_KEY:-}
+      SERVERMETRY_DEBUG: ${SERVERMETRY_DEBUG:-0}
+      SERVERMETRY_INTERVAL: ${SERVERMETRY_INTERVAL:-60}
+      SERVERMETRY_CONTAINER: "1"
+      SERVERMETRY_HOST_ROOT: /host
+    volumes:
+      - /:/host:ro,rslave
+    # No ports: mapping — network_mode: host uses the host network directly
+    # so localhost service checks and host NICs are visible.
